@@ -6,10 +6,14 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 
+
+
 query_name = os.listdir('../GANCP/celebA_query/')
 query_name.sort(key=lambda x: x[5:-4])
 query_name = query_name[1:]
 query = np.array([np.load('../GANCP/celebA_query/'+query_name[x]) for x in range(len(query_name))]).reshape((-1,512))
+
+
 
 artifact_index = [4,5,7,15,17,18,19,21,22,34,35,42,44,46,47,51,55,58,67,68,70,73,
         83,84,86,88,97,101,102,107,109,114,120,122,127,136,139,145,146,151,154,
@@ -39,7 +43,11 @@ artifact_index = [4,5,7,15,17,18,19,21,22,34,35,42,44,46,47,51,55,58,67,68,70,73
         1953,1954,1955,1957,1964,1976,1979,1980,1981,1983,1987,2015,
         ]
 
+
+
 normal_index = np.setdiff1d(np.array(range(0,2028)), artifact_index)
+
+
 
 def adjust_dynamic_range(data, drange_in, drange_out):
     if drange_in != drange_out:
@@ -48,6 +56,19 @@ def adjust_dynamic_range(data, drange_in, drange_out):
         data = data * scale + bias
     return data
 
+
+
+
+def print_image(image):
+    image = image.detach().cpu().numpy()
+    
+    image = adjust_dynamic_range(image, [image.max(), image.min()], [0,1])
+    
+    plt.imshow(image[0].transpose(1,2,0))
+    plt.show()
+
+    
+    
 def d_outputs(module : torch.nn.Module, name):
     features = []
    
@@ -69,6 +90,7 @@ def d_outputs(module : torch.nn.Module, name):
     hook.remove()
 
     return features
+
 
 
 class find_data_any():
@@ -97,10 +119,11 @@ class find_data_any():
         self.how_many_sign_equal = None
         self.distance = None
         
+        self.get_index()
         self.generate_image()
     
-        
-    def generate_image(self):
+    
+    def get_index(self,):
         if self.random:
             self.index = np.random.choice(self.query_index)
         else:
@@ -110,9 +133,16 @@ class find_data_any():
                 self.nidx = 0
                 print('Index is out of range')
                 return
+            
+    def generate_image(self, ind = -1):
         
+            
         with torch.no_grad():
-            self.gen_image = self.Gs_style(torch.Tensor([self.query[self.index,...]]).cuda(0))
+            if ind == -1:
+                self.get_index()
+                self.gen_image = self.Gs_style(torch.Tensor([self.query[self.index,...]]).cuda(0))
+            else:
+                self.gen_image = self.Gs_style(torch.Tensor([self.query[ind,...]]).cuda(0))
             self.gen_image = self.gen_image['image'].detach().cpu().numpy()
             print('gen_image.shape : ', self.gen_image.shape)
             self.gen_image_scale = self.adjust_dynamic_range(self.gen_image, [self.gen_image.min(), self.gen_image.max()], [0,1])
@@ -141,8 +171,6 @@ class find_data_any():
     
     
     def is_sign_equal(self,):
-        print(self.gen_image_sign.shape)
-        print(self.real_images_sign.shape)
         how_many_sign_equal = np.array([(~(self.gen_image_sign ^ self.real_images_sign[index])).sum() for index in range(0,30000)])
         return how_many_sign_equal
     
@@ -158,15 +186,16 @@ class find_data_any():
         
         indice = np.argsort(self.how_many_sign_equal)[:topn] if low else np.argsort(-self.how_many_sign_equal)[:topn]
         
-        indice_dist = None
+        indice_dist = []
         
         if dist:
             indice_dist = np.argsort(-self.distance)[:topn] if low else np.argsort(self.distance)[:topn]
 
         if show:
             self.plot_figure(indice, indice_dist, dist)
-
-        return indice, indice_dist
+        
+        # index of image starts from 1 to 30000. 
+        return indice + 1, indice_dist + 1
     
     def plot_figure(self, indice, indice_dist, dist = False):
         if dist:
@@ -182,7 +211,7 @@ class find_data_any():
         plt.title('Generated Image', fontsize=20)
         plt.imshow(self.gen_image_scale[0].transpose(1,2,0))
         
-        print('indice : ',indice)
+        print('indice : ',indice + 1)
         reals = np.array([np.array(Image.open(self.real_images+'{:05d}.jpg'.format(i+1))) for i in indice])
         
         for i in range(len(indice)):
@@ -203,3 +232,49 @@ class find_data_any():
         
     def __call__(self, topn, low = False, show = True, dist = False):
         return self.forward(topn = topn, low = low, show = show, dist = dist)
+    
+    
+
+def minmax(x):
+    if x.max() == x.min():
+        return (x-x.min())/(x.max() - x.min() + 1e-7)
+    return (x - x.min())/(x.max() - x.min())
+
+
+
+def dist_neighbor(feature_layer):
+    # feature_layer.shape = (training_iter_num, batch_size, channel, height, width)
+    dist = []
+    C = feature_layer[0].shape[1]
+    for c in range(C):
+        dist_each = 0.
+        for t in range(1,2000):
+            a = minmax(feature_layer[t][0][c])
+            b = minmax(feature_layer[t-1][0][c])
+            dist_each += np.abs((a - b).mean())
+
+        dist.append(dist_each)
+    return dist
+
+
+
+def show_features(feature_layer: list, channel_index_list: list, width: int , threshold = 0. , show_index = False, use_intb = True):
+
+    H = channel_index_list
+    W = width
+
+    gs = gridspec.GridSpec(len(H), W, wspace = 0.0, hspace = 0.1)
+
+    plt.figure(figsize = (W*2, len(H)*2))
+    plt.tight_layout()
+    intb = 2000//W if use_intb else 1
+    
+    for i,h in enumerate(H):
+       # plt.title('i')
+        for w in range(W):
+            plt.subplot(gs[i,w])
+            plt.axis('off')
+            plt.title(f'{intb*w}')
+            plt.imshow(feature_layer[intb*w][0][h])
+
+    plt.show()
